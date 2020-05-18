@@ -16,6 +16,9 @@ SERVER = demisto.params()['url'][:-1] if demisto.params()['url'].endswith('/') e
 BASE_URL = SERVER + '/rest/api'
 VERIFY_CERTIFICATE = not demisto.params().get('unsecure', False)
 
+
+
+
 # Support Credentials
 USERNAME = demisto.params()['credentials']['identifier']
 PASSWORD = demisto.params()['credentials']['password']
