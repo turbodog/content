@@ -2,16 +2,6 @@
 
 # Simple script to check if build should run all lint. Will return empty result if no need or a string explaining why yes.
 
-if [ -n "$NIGHTLY" ]; then
-    echo "NIGHTLY env var is set: $NIGHTLY. Skipping Content Docs Update"
-    exit 0
-fi
-
-if [ -n "$INSTANCE_TESTS" ]; then
-    echo "INSTANCE_TESTS env var is set: $INSTANCE_TESTS. Skipping Content Docs Update"
-    exit 0
-fi
-
 if [ -z "$CIRCLE_BRANCH" ]; then
     # simply compare against origin/master. Local testing case..
     DIFF_COMPARE=origin/master  # disable-secrets-detection
@@ -22,7 +12,7 @@ elif [ "$CIRCLE_BRANCH" == "master" ]; then
     if [ -z "$CIRCLE_COMPARE_URL" ]; then
         DIFF_COMPARE="HEAD^1...HEAD"
     else
-        DIFF_COMPARE=$(echo "$CIRCLE_COMPARE_URL" | sed 's:^.*/compare/::g')    
+        DIFF_COMPARE=$(echo "$CIRCLE_COMPARE_URL" | sed 's:^.*/compare/::g')
         if [ -z "${DIFF_COMPARE}" ]; then
             echo "Failed: extracting diff compare from CIRCLE_COMPARE_URL: ${CIRCLE_COMPARE_URL}. Fail.."
             exit 1
