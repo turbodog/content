@@ -593,6 +593,7 @@ def long_running_loop():
     """
     while True:
         error = ''
+        demisto.debug('Slack - checking for mirrors and answers')
         try:
             check_for_mirrors()
             check_for_answers()
@@ -849,6 +850,7 @@ async def slack_loop():
     while True:
         loop = asyncio.get_running_loop()
         rtm_client = None
+        demisto.info('Slack - Starting RTM client')
         try:
             rtm_client = slack.RTMClient(
                 token=BOT_TOKEN,
@@ -874,6 +876,7 @@ async def slack_loop():
         finally:
             # If we got here, the websocket is closed or the client can't connect. Will try to connect every 5 seconds.
             if rtm_client and not rtm_client._stopped:
+                demisto.info('Slack - RTM client stopped')
                 rtm_client.stop()
             await asyncio.sleep(5)
 
@@ -891,10 +894,12 @@ async def start_listening():
     """
     Starts a Slack RTM client and checks for mirrored incidents.
     """
+    demisto.info('Slack - starting loops')
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     loop = asyncio.get_running_loop()
     loop.run_in_executor(executor, long_running_loop)
     await slack_loop()
+    demisto.info('Slack - loop stopped')
 
 
 async def handle_dm(user: dict, text: str, client: slack.WebClient):
@@ -1814,7 +1819,7 @@ def long_running_main():
     asyncio.run(start_listening())
 
 
-def init_globals():
+def init_globals(command):
     """
     Initializes global variables according to the integration parameters
     """
@@ -1831,10 +1836,11 @@ def init_globals():
         # Use default SSL context
         SSL_CONTEXT = None
 
-    loop = asyncio.get_event_loop()
-    if not loop._default_executor:  # type: ignore[attr-defined]
-        demisto.info(f'setting _default_executor on loop: {loop} id: {id(loop)}')
-        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=4))
+    if command != 'long-running-execution':
+        loop = asyncio.get_event_loop()
+        if not loop._default_executor:  # type: ignore[attr-defined]
+            demisto.info(f'setting _default_executor on loop: {loop} id: {id(loop)}')
+            loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=4))
 
     BOT_TOKEN = demisto.params().get('bot_token')
     ACCESS_TOKEN = demisto.params().get('access_token')
@@ -1878,7 +1884,10 @@ def main():
     """
     if is_debug_mode():
         os.environ['PYTHONASYNCIODEBUG'] = "1"
-    init_globals()
+
+    command_name = demisto.command()
+
+    init_globals(command_name)
 
     commands = {
         'test-module': test_module,
@@ -1899,7 +1908,6 @@ def main():
     }
 
     try:
-        command_name = demisto.command()
         command_func = commands[command_name]
         command_func()
     except Exception as e:
