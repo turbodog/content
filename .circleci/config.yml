@@ -360,6 +360,7 @@ jobs:
             if ./Tests/scripts/is_ami.sh ;
               then
                 echo "Using AMI - Not downloading artifacts"
+
               else
                 ./Tests/scripts/server_get_artifact.sh $SERVER_CI_TOKEN
                 cp demistoserver.sh ./Tests/scripts/awsinstancetool/ansibleinstall/demistoserver.sh
@@ -370,12 +371,22 @@ jobs:
           command: |
             if [ -n "${INSTANCE_TESTS}" ];
               then
-                echo "Skipping - not running in INSTANCE_TESTS build"
+                echo "Skipping - not running in INSTANCE_TESTS build container"
                 exit 0
             fi
 
             [ -n "${NIGHTLY}" ] && IS_NIGHTLY=true || IS_NIGHTLY=false
             python3 ./Tests/scripts/collect_tests_and_content_packs.py -n $IS_NIGHTLY
+      - run:
+          name: Calculate Packs Dependencies
+          when: always
+          command: |
+            if [ $CIRCLE_NODE_INDEX -ne 0 ] ;
+              then
+                echo "Skipping - running only in container number 0"
+                exit 0
+            fi
+            python3 ./Tests/Marketplace/packs_dependencies.py -i ./Tests/id_set.json -o $CIRCLE_ARTIFACTS/packs_dependencies.json
       - run:
           name: Prepare Content Packs For Testing
           when: always
@@ -390,11 +401,6 @@ jobs:
             python3 ./Tests/Marketplace/zip_packs.py -b 'marketplace-ci-build' -z $ZIP_FOLDER -a $CIRCLE_ARTIFACTS -s $GCS_PATH -n $CIRCLE_BUILD_NUM -br $CIRCLE_BRANCH
             rm $GCS_PATH
           when: always
-      - run:
-          name: Calculate Packs Dependencies
-          when: always
-          command: |
-            python3 ./Tests/Marketplace/packs_dependencies.py -i ./Tests/id_set.json -o $CIRCLE_ARTIFACTS/packs_dependencies.json
       - run:
           name: Store Artifacts to GCS
           command: ./Tests/scripts/upload_artifacts.sh
@@ -433,14 +439,13 @@ jobs:
             fi
       - *store_artifacts
       - *persist_to_workspace
-  Server 5.0:
+  Server 4_1:
     <<: *container_config
     resource_class: medium+
     <<: *environment
     steps:
-      - *attach_workspace
       - setup_remote_docker
-      - *restore_cache
+      - *attach_workspace
       - *add_ssh_keys
       - *prepare_environment
       - run:
@@ -448,20 +453,15 @@ jobs:
           shell: /bin/bash
           when: always
           command: |
-            if ./Tests/scripts/is_ami.sh ;
-              then
-                python3 ./Tests/scripts/wait_until_server_ready.py "Demisto GA"
-
-              else
-                python3 ./Tests/scripts/wait_until_server_ready.py "master"
+            python3 ./Tests/scripts/wait_until_server_ready.py "Demisto two before GA"
       - run:
-          name: Run Tests - Server 5.0
+          name: Run Tests - Server 4.1
           shell: /bin/bash
           when: always
           command: |
-            echo "Demisto GA" > instance_role.txt
-            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto GA"')
-            echo "Demisto GA filter=$TEMP"
+            echo "Demisto two before GA" > instance_role.txt
+            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto two before GA"')
+            echo "Demisto two before GA filter=$TEMP"
             if [[ "$TEMP" == "false" ]];
               then
                 echo "Skipping - instance was not setup"
@@ -469,14 +469,14 @@ jobs:
             fi
             if ./Tests/scripts/is_ami.sh ;
               then
-                ./Tests/scripts/run_tests.sh "Demisto GA"
+                ./Tests/scripts/run_tests.sh "Demisto two before GA"
+
               else
-                ./Tests/scripts/run_tests.sh "master"
-                echo "master" > instance_role.txt
+                echo "Not AMI run, can't run on this version"
             fi
       - *destroy_instances
       - *store_artifacts
-  Server 4.5:
+  Server 4_5:
     <<: *container_config
     resource_class: medium+
     <<: *environment
@@ -513,7 +513,50 @@ jobs:
             fi
       - *destroy_instances
       - *store_artifacts
-  Server 4.1:
+  Server 5_0:
+    <<: *container_config
+    resource_class: medium+
+    <<: *environment
+    steps:
+      - *attach_workspace
+      - setup_remote_docker
+      - *restore_cache
+      - *add_ssh_keys
+      - *prepare_environment
+      - run:
+          name: Wait until server ready
+          shell: /bin/bash
+          when: always
+          command: |
+            if ./Tests/scripts/is_ami.sh ;
+              then
+                python3 ./Tests/scripts/wait_until_server_ready.py "Demisto GA"
+              else
+                python3 ./Tests/scripts/wait_until_server_ready.py "master"
+            fi
+      - run:
+          name: Run Tests - Server 5.0
+          shell: /bin/bash
+          when: always
+          command: |
+            echo "Demisto GA" > instance_role.txt
+            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto GA"')
+            echo "Demisto GA filter=$TEMP"
+            if [[ "$TEMP" == "false" ]];
+              then
+                echo "Skipping - instance was not setup"
+                exit 0
+            fi
+            if ./Tests/scripts/is_ami.sh ;
+              then
+                ./Tests/scripts/run_tests.sh "Demisto GA"
+              else
+                ./Tests/scripts/run_tests.sh "master"
+                echo "master" > instance_role.txt
+            fi
+      - *destroy_instances
+      - *store_artifacts
+  Server 5_5:
     <<: *container_config
     resource_class: medium+
     <<: *environment
@@ -527,15 +570,15 @@ jobs:
           shell: /bin/bash
           when: always
           command: |
-            python3 ./Tests/scripts/wait_until_server_ready.py "Demisto two before GA"
+            python3 ./Tests/scripts/wait_until_server_ready.py "Demisto PreGA"
       - run:
-          name: Run Tests - Server 4.1
+          name: Run Tests - 5.5
           shell: /bin/bash
           when: always
           command: |
-            echo "Demisto two before GA" > instance_role.txt
-            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto two before GA"')
-            echo "Demisto two before GA filter=$TEMP"
+            echo "Demisto PreGA" > instance_role.txt
+            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto PreGA"')
+            echo "Demisto PreGA filter=$TEMP"
             if [[ "$TEMP" == "false" ]];
               then
                 echo "Skipping - instance was not setup"
@@ -543,11 +586,20 @@ jobs:
             fi
             if ./Tests/scripts/is_ami.sh ;
               then
-                ./Tests/scripts/run_tests.sh "Demisto two before GA"
+                ./Tests/scripts/run_tests.sh "Demisto PreGA"
+                export RETVAL=$?
+                cp ./Tests/failed_tests.txt $CIRCLE_ARTIFACTS/failed_tests.txt
+                exit $RETVAL
 
-              else
+            else
                 echo "Not AMI run, can't run on this version"
             fi
+      - run:
+          name: Slack Notifier
+          shell: /bin/bash
+          command: |
+            ./Tests/scripts/slack_notifier.sh 'test_playbooks' ./env_results.json
+          when: always
       - *destroy_instances
       - *store_artifacts
   Demisto Marketplace:
@@ -601,55 +653,9 @@ jobs:
             ID_SET=$CIRCLE_ARTIFACTS/id_set.json
             GCS_PATH=$(mktemp)
             echo $GCS_MARKET_KEY > $GCS_PATH
-            python3 ./Tests/Marketplace/upload_packs.py -a $PACK_ARTIFACTS -e $EXTRACT_FOLDER -b 'marketplace-dist' -d $PACKS_DEPENDENCIES -i $ID_SET -s $GCS_PATH -n $CIRCLE_BUILD_NUM -k $PACK_SIGNING_KEY -pb 'marketplace-dist-private' -o
+            python3 ./Tests/Marketplace/upload_packs.py -a $PACK_ARTIFACTS -e $EXTRACT_FOLDER -b 'marketplace-dist' -d $PACKS_DEPENDENCIES -i $ID_SET -s $GCS_PATH -n $CIRCLE_BUILD_NUM -k $PACK_SIGNING_KEY -p 'All' -pb 'marketplace-dist-private' -o
             rm $GCS_PATH
           when: on_success
-      - *destroy_instances
-      - *store_artifacts
-  Server 5.5:
-    <<: *container_config
-    resource_class: medium+
-    <<: *environment
-    steps:
-      - setup_remote_docker
-      - *attach_workspace
-      - *add_ssh_keys
-      - *prepare_environment
-      - run:
-          name: Wait until server ready
-          shell: /bin/bash
-          when: always
-          command: |
-            python3 ./Tests/scripts/wait_until_server_ready.py "Demisto PreGA"
-      - run:
-          name: Run Tests - Server 5.5
-          shell: /bin/bash
-          when: always
-          command: |
-            echo "Demisto PreGA" > instance_role.txt
-            export TEMP=$(cat ./Tests/filter_envs.json | jq '."Demisto PreGA"')
-            echo "Demisto PreGA filter=$TEMP"
-            if [[ "$TEMP" == "false" ]];
-              then
-                echo "Skipping - instance was not setup"
-                exit 0
-            fi
-            if ./Tests/scripts/is_ami.sh ;
-              then
-                ./Tests/scripts/run_tests.sh "Demisto PreGA"
-                export RETVAL=$?
-                cp ./Tests/failed_tests.txt $CIRCLE_ARTIFACTS/failed_tests.txt
-                exit $RETVAL
-
-            else
-                echo "Not AMI run, can't run on this version"
-            fi
-      - run:
-          name: Slack Notifier
-          shell: /bin/bash
-          command: |
-            ./Tests/scripts/slack_notifier.sh 'test_playbooks' ./env_results.json
-          when: always
       - *destroy_instances
       - *store_artifacts
   Instance Test:
@@ -680,15 +686,11 @@ workflows:
   version: 2
   commit:
     jobs:
-      - pre-build
+      - pre-build:
+          context: nightly_env
       - Create Instances:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
+          context: nightly_env
       - Check if circleci config is up to date:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
           requires:
             - pre-build
       - Infrastructure testing:
@@ -700,54 +702,17 @@ workflows:
       - Validate Files and Yaml:
           requires:
             - pre-build
-      - Spell Checks:
-          requires:
-            - pre-build
       - Common Server Documentation:
           requires:
             - pre-build
-      - Verify Base Branch for Contribution:
-          filters:
-            branches:
-              only: /pull\/[0-9]+/
-          requires:
-            - pre-build
-      - Content Docs Site:
-          requires:
-            - pre-build
       - Run Unit Testing and Lint:
+          context: nightly_env
           requires:
             - pre-build
-      - Server 5.0:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
+      - Server 5_5:
           requires:
             - Create Instances
-      - Server 4.5:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
-          requires:
-            - Create Instances
-      - Server 4.1:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
-          requires:
-            - Create Instances
-      - Demisto Marketplace:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
-          requires:
-            - Create Instances
-      - Server 5.5:
-          filters:
-            branches:
-              ignore: /pull\/[0-9]+/
-          requires:
-            - Create Instances
+          context: nightly_env
 
   instances_testing:
     # for details of triggered builds see https://circleci.com/docs/2.0/workflows/#nightly-example
@@ -801,7 +766,7 @@ workflows:
           context: nightly_env
           requires:
             - pre-build
-      - Server 5.5:
+      - Server 5_5:
           requires:
             - Create Instances
           context: nightly_env
