@@ -45,6 +45,7 @@ configuration:
 description: Carbon Black Enterprise Protection is a next-generation endpoint threat
   prevention solution to deliver a portfolio of protection policies, real-time visibility
   across environments, and comprehensive compliance rule sets in a single platform.
+  This integration does not support the Carbon Black Cloud version, it supports the on-premise APIs
 display: Carbon Black Enterprise Protection v2
 name: CarbonBlackProtectionV2
 script:
