@@ -9,7 +9,8 @@ Code Conventions: https://xsoar.pan.dev/docs/integrations/code-conventions
 Linting: https://xsoar.pan.dev/docs/integrations/linting
 
 When building a Cortex XSOAR integration that is reusable, a lot of effort
-must be placed in the design. We recommend to fill a Design Document template,
+must be placed in the
+design. We recommend to fill a Design Document template,
 that allows you to capture Use Cases, Requirements and Inputs/Outputs.
 
 Example Design document for the this Integration (HelloWorld):
