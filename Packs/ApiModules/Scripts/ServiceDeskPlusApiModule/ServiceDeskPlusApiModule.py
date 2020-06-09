@@ -21,23 +21,39 @@ class ServiceDeskPlusClient(BaseClient):
                  # self deployed - code flow
                  auth_code: str = '',
                  token_retrieval_url: str = 'https://accounts.zoho.com/oauth/v2/token',
+                 redirect_uri: str = 'https://localhost/myapp',
 
                  # shared (oproxy + self deployed)
                  auth_id: str = '',  # can also be client id
                  enc_key: str = '',  # can also be client secret
+                 scope: str = 'SDPOnDemand.requests.ALL',
 
                  # optional - self deployed refresh token flow
                  refresh_token: str = '',
-
-                 scope: str = 'SDPOnDemand.requests.ALL',
-                 redirect_uri: str = 'https://localhost/myapp',
 
                  self_deployed: bool = False,
                  verify: bool = True,
                  base_url: str = 'https://www.zohoapis.com',
                  *args, **kwargs):
+        """
+        Service Desk Plus OAuth 2 client
+        :param auth_token: Oproxy token
+        :param token_retrieval_url: Accounts server to get token from
+        :param redirect_uri: Redirect URI
+        :param auth_id: Oproxy ID OR client ID
+        :param enc_key: Oproxy Key OR client Secret
+        :param scope: Access token scope
+        :param (Optional) auth_code: Code to generate refresh token with. In self_deployed use this or refresh_token
+        :param (Optional) refresh_token: Token to refresh token with. In self_deployed use this or auth_code
+        :param self_deployed: is self deployed
+        :param verify: is verify
+        :param base_url: URL to send requests to
+        :param args:
+        :param kwargs:
+        """
         super().__init__(base_url=base_url, verify=verify, *args, **kwargs)  # type: ignore[misc]
 
+        self.scope = scope
         # oproxy flow
         if not self_deployed:
             # provide support for dev oproxy
@@ -58,7 +74,6 @@ class ServiceDeskPlusClient(BaseClient):
             self.client_id = auth_id
             self.client_secret = enc_key
             self.auth_code = auth_code
-            self.scope = scope
             self.redirect_uri = redirect_uri
 
             # optional flow
@@ -67,7 +82,7 @@ class ServiceDeskPlusClient(BaseClient):
         self.auth_type = SELF_DEPLOYED_AUTH_TYPE if self_deployed else OPROXY_AUTH_TYPE
 
 
-    def http_request(self, *args, resp_type='json', headers=None, return_empty_response=False, **kwargs):
+    def http_request(self, *args, resp_type='json', headers=None, **kwargs):
         """
         Overrides Base client request function, retrieves and adds to headers access token before sending the request.
 
@@ -97,10 +112,6 @@ class ServiceDeskPlusClient(BaseClient):
             str: Access token that will be added to authorization header.
         """
         integration_context = demisto.getIntegrationContext()
-        api_domain = integration_context.get('api_domain')
-        # TODO: Improve self._base_url assignment - non functional programming
-        if api_domain:
-            self._base_url = api_domain
         access_token = integration_context.get('access_token')
         refresh_token = integration_context.get('refresh_token')
         valid_until = integration_context.get('valid_until')
@@ -110,10 +121,9 @@ class ServiceDeskPlusClient(BaseClient):
 
         auth_type = self.auth_type
         if auth_type == OPROXY_AUTH_TYPE:
-            # TODO: Improve self._base_url assignment - non functional programming
-            access_token, expires_in, self._base_url = self._oproxy_authorize()
+            access_token, expires_in = self._oproxy_authorize()
         else:
-            access_token, expires_in, refresh_token, self._base_url = self._get_self_deployed_token(refresh_token)
+            access_token, expires_in, refresh_token = self._get_self_deployed_token(refresh_token)
         time_now = self.epoch_seconds()
         time_buffer = 5  # seconds by which to shorten the validity period
         if expires_in - time_buffer > 0:
@@ -121,7 +131,6 @@ class ServiceDeskPlusClient(BaseClient):
             expires_in = expires_in - time_buffer
 
         integration_context = {
-            'api_domain': self._base_url,
             'access_token': access_token,
             'refresh_token': refresh_token,
             'valid_until': time_now + expires_in,
@@ -130,7 +139,7 @@ class ServiceDeskPlusClient(BaseClient):
         demisto.setIntegrationContext(integration_context)
         return access_token
 
-    def _oproxy_authorize(self) -> Tuple[str, int, str]:
+    def _oproxy_authorize(self) -> Tuple[str, int]:
         """
         Gets a token by authorizing with oproxy.
 
@@ -144,7 +153,8 @@ class ServiceDeskPlusClient(BaseClient):
             headers=headers,
             json={
                 'oproxy_id': self.auth_id,
-                'enc_token': self.get_encrypted(content, self.enc_key)
+                'enc_token': self.get_encrypted(content, self.enc_key),
+                'scope': self.scope
             },
             verify=self._verify
         )
@@ -178,7 +188,7 @@ class ServiceDeskPlusClient(BaseClient):
                 'The response from the Oproxy server did not contain the expected content.'
             )
 
-        return (parsed_response.get('access_token', ''), parsed_response.get('expires_in', 3595), parsed_response.get('api_domain', ''))
+        return (parsed_response.get('access_token', ''), parsed_response.get('expires_in', 3595))
 
     def _get_self_deployed_token(self, refresh_token: str = None):
         if refresh_token is None:
@@ -210,8 +220,7 @@ class ServiceDeskPlusClient(BaseClient):
 
         access_token = response_json.get('access_token', '')
         expires_in = int(response_json.get('expires_in', 3595))
-        api_domain = response_json.get('api_domain')
-        return access_token, expires_in, refresh_token, api_domain
+        return access_token, expires_in, refresh_token
 
     @staticmethod
     def error_parser(error: requests.Response) -> str:
