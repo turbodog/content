@@ -9,8 +9,15 @@ import threading
 import subprocess
 import traceback
 from time import sleep
-from datetime import datetime
+import datetime
 from distutils.version import LooseVersion
+
+import pytz
+
+from google.cloud import storage
+from google.api_core.exceptions import PreconditionFailed
+from queue import SimpleQueue
+from contextlib import contextmanager
 
 import urllib3
 import requests
@@ -35,7 +42,9 @@ FAILED_MATCH_INSTANCE_MSG = "{} Failed to run.\n There are {} instances of {}, p
 
 SERVICE_RESTART_TIMEOUT = 300
 SERVICE_RESTART_POLLING_INTERVAL = 5
-
+LOCKS_PATH = 'content-locks'
+BUCKET_NAME = os.environ.get('GCS_ARTIFACTS_BUCKET')
+CIRCLE_BUILD_NUM = os.environ.get('CIRCLE_BUILD_NUM')
 SLACK_MEM_CHANNEL_ID = 'CM55V7J8K'
 
 
@@ -116,7 +125,7 @@ class ParallelPrintsManager:
     def add_print_job(self, message_to_print, print_function_to_execute, thread_index, message_color=None,
                       include_timestamp=False):
         if include_timestamp:
-            message_to_print = f'[{datetime.now()}] {message_to_print}'
+            message_to_print = f'[{datetime.datetime.now()}] {message_to_print}'
 
         print_job = PrintJob(message_to_print, print_function_to_execute, message_color=message_color)
         self.threads_print_jobs[thread_index].append(print_job)
@@ -816,16 +825,24 @@ def execute_testing(tests_settings, server_ip, mockable_tests_names, unmockable_
             reset_containers(server, demisto_api_key, prints_manager, thread_index)
 
         prints_manager.add_print_job("\nRunning mock-disabled tests", print, thread_index)
+        tests_queue = SimpleQueue()
         for t in unmockable_tests:
-            run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_tests_conf, nightly_integrations,
-                              skipped_integrations_conf, skipped_integration, is_nightly, run_all_tests,
-                              is_filter_configured, filtered_tests, skipped_tests, secret_params, failed_playbooks,
-                              playbook_skipped_integration,
-                              unmockable_integrations, succeed_playbooks, slack, circle_ci, build_number, server,
-                              build_name, server_numeric_version, demisto_api_key,
-                              prints_manager, thread_index, is_ami)
-
-            prints_manager.execute_thread_prints(thread_index)
+            tests_queue.put(t)
+        while not tests_queue.empty():
+            t = tests_queue.get()
+            with acquire_test_lock(t, default_test_timeout, tests_queue, prints_manager, thread_index) as lock:
+                if lock:
+                    run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_tests_conf, nightly_integrations,
+                                      skipped_integrations_conf, skipped_integration, is_nightly, run_all_tests,
+                                      is_filter_configured, filtered_tests, skipped_tests, secret_params, failed_playbooks,
+                                      playbook_skipped_integration,
+                                      unmockable_integrations, succeed_playbooks, slack, circle_ci, build_number, server,
+                                      build_name, server_numeric_version, demisto_api_key,
+                                      prints_manager, thread_index, is_ami)
+                    prints_manager.execute_thread_prints(thread_index)
+                else:
+                    prints_manager.execute_thread_prints(thread_index)
+                    continue
 
     except Exception as exc:
         prints_manager.add_print_job(f'~~ Thread {thread_index + 1} failed ~~\n{str(exc)}\n{traceback.format_exc()}',
@@ -1016,14 +1033,215 @@ def handle_github_response(response):
     return res_dict
 
 
+@contextmanager
+def acquire_test_lock(test_details: dict,
+                      default_test_timeout: int,
+                      queue: SimpleQueue,
+                      prints_manager: ParallelPrintsManager,
+                      thread_index: int) -> None:
+    """
+    This is a context manager that handles all the locking and unlocking of integrations.
+    Execution is as following:
+    * Attempts to lock the test's integrations and yields the result of this attempt
+    * If lock attempt has failed- puts the test back in the queue
+    * Once the test is done- will unlock all integrations
+    Args:
+        test_details: Details of the currently executed test
+        default_test_timeout: Default test timeout in seconds
+        queue: A queue for the tests that still needs to be executed
+        prints_manager: ParallelPrintsManager object
+        thread_index: The index of the thread that executes the unlocking
+    """
+    storage_client = storage.Client()
+    locked = lock_integrations(test_details, default_test_timeout, storage_client, prints_manager, thread_index)
+    if not locked:
+        queue.put(test_details)
+    try:
+        yield locked
+    finally:
+        if not locked:
+            return
+        # executing the test could take a while, re-instancing the storage client
+        storage_client = storage.Client()
+        unlock_integrations(get_integrations_list(test_details), prints_manager, storage_client, thread_index)
+
+
+def lock_integrations(test_details: dict,
+                      default_test_timeout: int,
+                      storage_client: storage.Client,
+                      prints_manager: ParallelPrintsManager,
+                      thread_index: int) -> bool:
+    """
+    Locks all the test's integrations
+    Args:
+        test_details: Details of the currently executed test
+        default_test_timeout: Default test timeout in seconds
+        storage_client: The GCP storage client
+        prints_manager: ParallelPrintsManager object
+        thread_index: The index of the thread that executes the unlocking
+
+    Returns:
+        True if all the test's integrations were successfully locked, else False
+    """
+    integrations = get_integrations_list(test_details)
+    existing_integrations_lock_files = get_locked_integrations(integrations, storage_client)
+    for _, lock_file in existing_integrations_lock_files.items():
+        # Each file has content in the form of <circleci-build-number>:<timeout in seconds>
+        # In this iteration we only need the timeout
+        _, lock_timeout = lock_file.download_as_string().decode().split(':')
+        if not lock_expired(lock_file, lock_timeout):
+            # there is a locked integration for which the lock is not expired- test cannot be executed at the moment
+            return False
+    integrations_generation_number = {}
+    # Gathering generation number with which the new file will be created,
+    # See https://cloud.google.com/storage/docs/generations-preconditions for details.
+    for integration in integrations:
+        if integration in existing_integrations_lock_files:
+            integrations_generation_number[integration] = existing_integrations_lock_files[integration].generation
+        else:
+            integrations_generation_number[integration] = 0
+    test_timeout = test_details.get('timeout', default_test_timeout)
+    return create_lock_files(integrations_generation_number, prints_manager,
+                             storage_client, test_details, test_timeout, thread_index)
+
+
+def get_integrations_list(test_details: dict) -> list:
+    """
+    Since test details can have one integration as a string and sometimes a list of integrations- this methods
+    parses the test's integrations into a list of integration names.
+    Args:
+        test_details: Details of the currently executed test
+    Returns:
+        the integration names in a list for all the integrations that takes place in the test
+        specified in test details.
+    """
+    integrations = test_details.get('integrations', [])
+    if isinstance(integrations, str):
+        integrations = [integrations]
+    return integrations
+
+
+def create_lock_files(integrations_generation_number: dict,
+                      prints_manager: ParallelPrintsManager,
+                      storage_client: storage.Client,
+                      test_details: dict,
+                      test_timeout: int,
+                      thread_index: int) -> bool:
+    """
+    This method tries to create a lock files for all integrations specified in 'integrations_generation_number'.
+    Each file should contain <circle-ci-build-number>:<test-timeout>
+    where the <circle-ci-build-number> part is for debugging and troubleshooting
+    and the <test-timeout> part is to be able to unlock revoked test files.
+    If for any of the integrations, the lock file creation will fail- the already created files will be cleaned.
+    Args:
+        integrations_generation_number: A dict in the form of {<integration-name>:<integration-generation>}
+        prints_manager: ParallelPrintsManager object
+        storage_client: The GCP storage client
+        test_details: Details of the currently executed test
+        test_timeout: The time out
+        thread_index:
+
+    Returns:
+
+    """
+    locked_integrations = []
+    bucket = storage_client.bucket(BUCKET_NAME)
+    prints_manager.add_print_job(f'attempting to lock integrations: {integrations_generation_number.keys()}',
+                                 print,
+                                 thread_index,
+                                 include_timestamp=True)
+    for integration, generation_number in integrations_generation_number.items():
+        blob = bucket.blob(f'{LOCKS_PATH}/{integration}')
+        try:
+            blob.upload_from_string(f'{CIRCLE_BUILD_NUM}:{test_timeout + 30}', if_generation_match=generation_number)
+            prints_manager.add_print_job(f'integration {integration} locked',
+                                         print,
+                                         thread_index,
+                                         include_timestamp=True)
+            locked_integrations.append(integration)
+        except PreconditionFailed:
+            # if this exception occurs it means that another build has locked this integration
+            # before this build managed to do it.
+            # we need to unlock all the integrations we have already locked and try again later
+            prints_manager.add_print_job(
+                f'Could not lock integration {integration}, delaying test execution for test with details: {test_details}',
+                print_warning,
+                thread_index,
+                include_timestamp=True)
+            unlock_integrations(locked_integrations, prints_manager, storage_client, thread_index)
+            return False
+    return True
+
+
+def unlock_integrations(locked_integrations: list,
+                        prints_manager: ParallelPrintsManager,
+                        storage_client: storage.Client,
+                        thread_index: int) -> None:
+    """
+    Delete all integration lock files for integrations specified in 'locked_integrations'
+    Args:
+        locked_integrations: Integration to unlock
+        prints_manager: ParallelPrintsManager object
+        storage_client: The GCP storage client
+        thread_index: The index of the thread that executes the unlocking
+    """
+    locked_integration_blobs = get_locked_integrations(locked_integrations, storage_client)
+    for integration, lock_file in locked_integration_blobs.items():
+        try:
+            lock_file.delete(if_generation_match=lock_file.generation)
+        except PreconditionFailed:
+            prints_manager.add_print_job(f'Could not unlock integration {integration}',
+                                         print_warning,
+                                         thread_index,
+                                         include_timestamp=True)
+
+
+def get_locked_integrations(integrations: list, storage_client: storage.Client) -> dict:
+    """
+    Getting all locked integrations files
+    Args:
+        integrations: Integrations that we want to get lock files for
+        storage_client: The GCP storage client
+
+    Returns:
+        A dict of the form {<integration-name>:<integration-blob-object>} for all integrations that has a blob object.
+    """
+    # Listing all files in lock folder
+    # Wrapping in 'list' operator because list_blobs return a generator which can only be iterated once
+    lock_files_ls = list(storage_client.list_blobs(BUCKET_NAME, prefix=f'{LOCKS_PATH}'))
+    existing_integrations_lock_files = {}
+    # Getting all existing files details for integrations that we want to lock
+    for integration in integrations:
+        existing_integrations_lock_files.update({integration: [lock_file_blob for lock_file_blob in lock_files_ls if
+                                                               lock_file_blob.name == f'{LOCKS_PATH}/{integration}']})
+    # Filtering 'existing_integrations_lock_files' from integrations with no files
+    existing_integrations_lock_files = {integration: blob_files[0] for integration, blob_files in
+                                        existing_integrations_lock_files.items() if blob_files}
+    return existing_integrations_lock_files
+
+
+def lock_expired(lock_file: storage.Blob, lock_timeout: str) -> bool:
+    """
+    Checks if the time that passed since the creation of the 'lock_file' is more then 'lock_timeout'.
+    If not- it means that the integration represented by the lock file is currently locked and is tested in another build
+    Args:
+        lock_file: The lock file blob object
+        lock_timeout: The expiration timeout of the lock in seconds
+
+    Returns:
+        True if the lock has expired it's timeout, else False
+    """
+    return datetime.datetime.now(tz=pytz.utc) - lock_file.time_created >= datetime.timedelta(seconds=int(lock_timeout))
+
+
 def main():
-    print("Time is: {}\n\n\n".format(datetime.now()))
+    print("Time is: {}\n\n\n".format(datetime.datetime.now()))
     tests_settings = options_handler()
 
     # should be removed after solving: https://github.com/demisto/etc/issues/21383
     # -------------
     if 'master' in tests_settings.serverVersion.lower():
-        print('[{}] sleeping for 30 secs'.format(datetime.now()))
+        print('[{}] sleeping for 30 secs'.format(datetime.datetime.now()))
         sleep(45)
     # -------------
     manage_tests(tests_settings)
