@@ -44,7 +44,7 @@ references:
         echo 'export GOOGLE_APPLICATION_CREDENTIALS="creds.json"' >> $BASH_ENV
         echo "=== sourcing $BASH_ENV ==="
         source $BASH_ENV
-        cat <<EOF > "$GOOGLE_APPLICATION_CREDENTIALS"
+        cat \<<EOF > "$GOOGLE_APPLICATION_CREDENTIALS"
         $GCS_ARTIFACTS_KEY
         EOF
         sudo mkdir -p -m 777 $CIRCLE_ARTIFACTS
@@ -111,7 +111,6 @@ references:
       NON_AMI_RUN: << pipeline.parameters.non_ami_run >>
       ARTIFACT_BUILD_NUM: << pipeline.parameters.artifact_build_num >>
       SERVER_BRANCH_NAME: << pipeline.parameters.server_branch_name >>
-
 
   persist_to_workspace: &persist_to_workspace
     persist_to_workspace:
@@ -391,10 +390,6 @@ jobs:
             rm $GCS_PATH
           when: always
       - run:
-          name: Store Artifacts to GCS
-          command: ./Tests/scripts/upload_artifacts.sh
-          when: always
-      - run:
           name: Create Instance
           when: always
           command: |
@@ -438,6 +433,10 @@ jobs:
       - *restore_cache
       - *add_ssh_keys
       - *prepare_environment
+      - run:
+          name: Store Artifacts to GCS
+          command: ./Tests/scripts/upload_artifacts.sh
+          when: always
       - run:
           name: Wait until server ready
           shell: /bin/bash

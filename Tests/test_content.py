@@ -592,7 +592,7 @@ def run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_te
                       skipped_integrations_conf, skipped_integration, is_nightly, run_all_tests, is_filter_configured,
                       filtered_tests, skipped_tests, secret_params, failed_playbooks, playbook_skipped_integration,
                       unmockable_integrations, succeed_playbooks, slack, circle_ci, build_number, server, build_name,
-                      server_numeric_version, demisto_api_key, prints_manager, thread_index=0, is_ami=True):
+                      server_numeric_version, demisto_api_key, prints_manager, thread_index=0, is_ami=True, tests_queue=None):
     playbook_id = t['playbookID']
     nightly_test = t.get('nightly', False)
     integrations_conf = t.get('integrations', [])
@@ -674,9 +674,14 @@ def run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_te
         text = stdout if not stderr else stderr
         send_slack_message(slack, SLACK_MEM_CHANNEL_ID, text, 'Content CircleCI', 'False')
 
-    run_test(tests_settings, demisto_api_key, proxy, failed_playbooks, integrations, unmockable_integrations,
-             playbook_id, succeed_playbooks, test_message, test_options, slack, circle_ci,
-             build_number, server, build_name, prints_manager, is_ami, thread_index=thread_index)
+    # If queue is None- it means we're in mocked tests, no need to actually lock integrations
+    with acquire_test_lock(t, default_test_timeout, prints_manager, thread_index, bool(tests_queue)) as lock:
+        if lock:
+            run_test(tests_settings, demisto_api_key, proxy, failed_playbooks, integrations, unmockable_integrations,
+                     playbook_id, succeed_playbooks, test_message, test_options, slack, circle_ci,
+                     build_number, server, build_name, prints_manager, is_ami, thread_index=thread_index)
+        else:
+            tests_queue.put(t)
 
 
 def get_server_numeric_version(ami_env, is_local_run=False):
@@ -830,19 +835,14 @@ def execute_testing(tests_settings, server_ip, mockable_tests_names, unmockable_
             tests_queue.put(t)
         while not tests_queue.empty():
             t = tests_queue.get()
-            with acquire_test_lock(t, default_test_timeout, tests_queue, prints_manager, thread_index) as lock:
-                if lock:
-                    run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_tests_conf, nightly_integrations,
-                                      skipped_integrations_conf, skipped_integration, is_nightly, run_all_tests,
-                                      is_filter_configured, filtered_tests, skipped_tests, secret_params, failed_playbooks,
-                                      playbook_skipped_integration,
-                                      unmockable_integrations, succeed_playbooks, slack, circle_ci, build_number, server,
-                                      build_name, server_numeric_version, demisto_api_key,
-                                      prints_manager, thread_index, is_ami)
-                    prints_manager.execute_thread_prints(thread_index)
-                else:
-                    prints_manager.execute_thread_prints(thread_index)
-                    continue
+            run_test_scenario(tests_settings, t, proxy, default_test_timeout, skipped_tests_conf, nightly_integrations,
+                              skipped_integrations_conf, skipped_integration, is_nightly, run_all_tests,
+                              is_filter_configured, filtered_tests, skipped_tests, secret_params, failed_playbooks,
+                              playbook_skipped_integration,
+                              unmockable_integrations, succeed_playbooks, slack, circle_ci, build_number, server,
+                              build_name, server_numeric_version, demisto_api_key,
+                              prints_manager, thread_index, is_ami, tests_queue=tests_queue)
+            prints_manager.execute_thread_prints(thread_index)
 
     except Exception as exc:
         prints_manager.add_print_job(f'~~ Thread {thread_index + 1} failed ~~\n{str(exc)}\n{traceback.format_exc()}',
@@ -1036,9 +1036,9 @@ def handle_github_response(response):
 @contextmanager
 def acquire_test_lock(test_details: dict,
                       default_test_timeout: int,
-                      queue: SimpleQueue,
                       prints_manager: ParallelPrintsManager,
-                      thread_index: int) -> None:
+                      thread_index: int,
+                      is_not_mocked: bool = False) -> None:
     """
     This is a context manager that handles all the locking and unlocking of integrations.
     Execution is as following:
@@ -1048,18 +1048,19 @@ def acquire_test_lock(test_details: dict,
     Args:
         test_details: Details of the currently executed test
         default_test_timeout: Default test timeout in seconds
-        queue: A queue for the tests that still needs to be executed
         prints_manager: ParallelPrintsManager object
         thread_index: The index of the thread that executes the unlocking
+        is_not_mocked: If the test is mockable - no need to actually lock it
     """
     storage_client = storage.Client()
-    locked = lock_integrations(test_details, default_test_timeout, storage_client, prints_manager, thread_index)
-    if not locked:
-        queue.put(test_details)
+    if is_not_mocked:
+        locked = True
+    else:
+        locked = lock_integrations(test_details, default_test_timeout, storage_client, prints_manager, thread_index)
     try:
         yield locked
     finally:
-        if not locked:
+        if not locked or is_not_mocked:
             return
         # executing the test could take a while, re-instancing the storage client
         storage_client = storage.Client()
@@ -1084,6 +1085,8 @@ def lock_integrations(test_details: dict,
         True if all the test's integrations were successfully locked, else False
     """
     integrations = get_integrations_list(test_details)
+    if not integrations:
+        return True
     existing_integrations_lock_files = get_locked_integrations(integrations, storage_client)
     for _, lock_file in existing_integrations_lock_files.items():
         # Each file has content in the form of <circleci-build-number>:<timeout in seconds>
